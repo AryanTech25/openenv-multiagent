@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 from typing import Optional, Dict, Any
 import numpy as np
+import gymnasium as gym
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -74,51 +75,53 @@ class TrainingConfig:
         }
 
 
-class EnvironmentWrapper:
+class EnvironmentWrapper(gym.Env):
     """Wrapper to make ManagerWorkerEnv compatible with stable-baselines3."""
     
     def __init__(self, env_config: Optional[Dict[str, Any]] = None):
         """Initialize environment wrapper."""
+        super().__init__()
         self.env = ManagerWorkerEnv(env_config)
         self.observation_space = self._get_observation_space()
         self.action_space = self._get_action_space()
     
     def _get_observation_space(self):
         """Get observation space compatible with stable-baselines3."""
-        from gymnasium import spaces
         
         # Create a dict space matching the observation structure
-        return spaces.Dict({
-            'task_embedding': spaces.Box(
+        return gym.spaces.Dict({
+            'task_embedding': gym.spaces.Box(
                 low=-1.0, high=1.0, shape=(64,), dtype=np.float32
             ),
-            'worker_states': spaces.Box(
+            'worker_states': gym.spaces.Box(
                 low=0.0, high=1.0, shape=(4, 5), dtype=np.float32
             ),
-            'subtask_status': spaces.MultiBinary(4),
-            'budget_remaining': spaces.Box(
+            'subtask_status': gym.spaces.MultiBinary(4),
+            'budget_remaining': gym.spaces.Box(
                 low=0.0, high=1.0, shape=(1,), dtype=np.float32
             ),
-            'steps_remaining': spaces.Box(
+            'steps_remaining': gym.spaces.Box(
                 low=0.0, high=1.0, shape=(1,), dtype=np.float32
             ),
         })
     
     def _get_action_space(self):
         """Get action space compatible with stable-baselines3."""
-        from gymnasium import spaces
-        return spaces.Discrete(7)
+        return gym.spaces.Discrete(7)
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """Reset environment and return observation."""
+        if seed is not None:
+            np.random.seed(seed)
         obs = self.env.reset()
-        return self._convert_observation(obs)
+        return self._convert_observation(obs), {}
     
     def step(self, action: int):
         """Execute action and return observation, reward, done, info."""
         manager_action = ManagerAction(action_id=action)
         obs, reward, done, info = self.env.step(manager_action)
-        return self._convert_observation(obs), reward, done, info
+        # Convert to gymnasium format: obs, reward, terminated, truncated, info
+        return self._convert_observation(obs), reward, done, False, info
     
     def _convert_observation(self, obs):
         """Convert ManagerWorkerObservation to dict format for stable-baselines3."""

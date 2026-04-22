@@ -155,23 +155,23 @@ This is a reinforcement learning training environment built on OpenEnv that simu
   - Set hyperparameters: learning_rate=3e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99
   - _Requirements: 9.1-9.7_
 
-- [ ] 2.2 Set up TensorBoard logging
+- [x] 2.2 Set up TensorBoard logging
   - Configure TensorBoard callback to log: cumulative_reward, episode_length, task_quality, tokens_used, hallucination_detection_rate
   - Log metrics every 1000 steps
   - _Requirements: 21.1_
 
-- [ ] 2.3 Set up WandB logging
+- [x] 2.3 Set up WandB logging
   - Configure WandB callback to log: same metrics plus learning_rate, policy_loss, value_loss, entropy
   - Create WandB project and run
   - _Requirements: 21.2_
 
-- [ ] 2.4 Implement model saving to HuggingFace Hub
+- [x] 2.4 Implement model saving to HuggingFace Hub
   - Save model checkpoint with model card and training metadata
   - Include hyperparameters and training_timesteps in checkpoint
   - Push to HuggingFace Hub
   - _Requirements: 20.1-20.5_
 
-- [ ] 2.5 Create colab_notebook.ipynb for free Colab training
+- [x] 2.5 Create colab_notebook.ipynb for free Colab training
   - Install dependencies: openenv, stable-baselines3, huggingface-hub, wandb
   - Import environment and training utilities
   - Run 50,000 step training session
@@ -179,19 +179,19 @@ This is a reinforcement learning training environment built on OpenEnv that simu
   - Show before/after Manager behavior comparison
   - _Requirements: 19.1-19.6_
 
-- [ ] 2.6 Run baseline training (50,000 steps) and verify learning curves
+- [x] 2.6 Run baseline training (50,000 steps) and verify learning curves
   - Execute training script
   - Verify reward curves show improvement over time
   - Verify hallucination detection rate increases
   - Save trained model
   - _Requirements: 9.8_
 
-- [ ] 2.7 Checkpoint - Ensure training completes successfully
+- [x] 2.7 Checkpoint - Ensure training completes successfully
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Part 3: Backend API (backend/ folder) - Depends on Part 1
 
-- [ ] 3.1 Create FastAPI server structure
+- [x] 3.1 Create FastAPI server structure
   - Create backend/main.py with FastAPI app
   - Set up CORS middleware
   - Initialize environment instance
