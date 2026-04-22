@@ -149,7 +149,7 @@ This is a reinforcement learning training environment built on OpenEnv that simu
 
 ## Part 2: Training Pipeline (training/ folder) - Depends on Part 1
 
-- [ ] 2.1 Create train_manager.py with PPO + DummyVecEnv setup
+- [x] 2.1 Create train_manager.py with PPO + DummyVecEnv setup
   - Instantiate environment wrapped in DummyVecEnv
   - Create PPO agent with MultiInputPolicy
   - Set hyperparameters: learning_rate=3e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99

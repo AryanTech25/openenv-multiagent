@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Quick test script to verify the environment works correctly.
+Quick test script to verify the OpenEnv-based environment works correctly.
 """
 
 import sys
 sys.path.insert(0, '.')
 
-from env import ManagerWorkerEnv
+from env import ManagerWorkerEnv, ManagerAction
 import numpy as np
 
 def test_environment():
     """Test basic environment functionality."""
     print("=" * 80)
-    print("Testing ManagerWorkerEnv")
+    print("Testing ManagerWorkerEnv (OpenEnv-based)")
     print("=" * 80)
     
     # Create environment
@@ -30,22 +30,23 @@ def test_environment():
     # Test reset
     obs = env.reset()
     print(f"✓ Environment reset")
-    print(f"  - Observation keys: {obs.keys()}")
-    print(f"  - Task embedding shape: {obs['task_embedding'].shape}")
-    print(f"  - Worker states shape: {obs['worker_states'].shape}")
-    print(f"  - Subtask status shape: {obs['subtask_status'].shape}")
-    print(f"  - Budget remaining: {obs['budget_remaining'][0]:.2f}")
-    print(f"  - Steps remaining: {obs['steps_remaining'][0]:.2f}")
+    print(f"  - Observation type: {type(obs).__name__}")
+    print(f"  - Task embedding length: {len(obs.task_embedding)}")
+    print(f"  - Worker states shape: {len(obs.worker_states)}x{len(obs.worker_states[0])}")
+    print(f"  - Subtask status: {obs.subtask_status}")
+    print(f"  - Budget remaining: {obs.budget_remaining:.2f}")
+    print(f"  - Steps remaining: {obs.steps_remaining:.2f}")
     
     # Test a few steps
     print(f"\n✓ Running 10 random steps...")
     total_reward = 0
     for step in range(10):
-        action = env.action_space.sample()
+        action_id = np.random.randint(0, 7)
+        action = ManagerAction(action_id=action_id)
         obs, reward, done, info = env.step(action)
         total_reward += reward
         
-        action_name = env.ACTION_NAMES[action]
+        action_name = env.ACTION_NAMES[action_id]
         print(f"  Step {step+1}: action={action_name}, reward={reward:.2f}, done={done}")
         
         if done:

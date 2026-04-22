@@ -8,18 +8,22 @@ Manager to learn detection and correction strategies under a limited token budge
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 import numpy as np
-import gym
-from gym import spaces
+from pydantic import BaseModel, Field
+
+from openenv.core import Environment, State, Observation, Action
 
 from env.task_library import TaskLibrary, Task, Subtask
 from env.hallucination_engine import HallucinationEngine
 from env.reward_calculator import RewardCalculator
 
 
-@dataclass
-class WorkerState:
+# ============================================================================
+# Pydantic Models for OpenEnv
+# ============================================================================
+
+class WorkerStateModel(BaseModel):
     """Represents the state of a single worker agent."""
     
     worker_id: int
@@ -33,43 +37,57 @@ class WorkerState:
     output_buffer: str = ""
     patience_counter: int = 0  # For detecting stuck loops
     skill_level: float = 0.5  # 0.3 to 1.0
-    
-    def to_array(self) -> np.ndarray:
-        """Convert worker state to observation array [is_active, progress, hallucination_risk, output_quality, tokens_consumed_ratio]."""
-        return np.array([
-            float(self.is_active),
-            self.progress,
-            self.hallucination_risk_score,
-            self.output_quality_if_checked,
-            # tokens_consumed_ratio will be set by environment
-        ], dtype=np.float32)
 
 
-@dataclass
-class EpisodeLog:
-    """Tracks events that occur during an episode."""
+class ManagerWorkerObservation(Observation):
+    """Observation from the environment."""
     
-    steps: List[Dict[str, Any]] = field(default_factory=list)
-    
-    def add_step(self, step_num: int, action: int, reward: float, info: Dict[str, Any]) -> None:
-        """Log a step in the episode."""
-        self.steps.append({
-            'step': step_num,
-            'action': action,
-            'reward': reward,
-            'info': info,
-        })
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert episode log to dictionary."""
-        return {'steps': self.steps}
+    task_embedding: List[float] = Field(..., description="64-dimensional task embedding")
+    worker_states: List[List[float]] = Field(..., description="4x5 worker states array")
+    subtask_status: List[int] = Field(..., description="Binary array of subtask completion")
+    budget_remaining: float = Field(..., description="Remaining budget as fraction [0, 1]")
+    steps_remaining: float = Field(..., description="Remaining steps as fraction [0, 1]")
+    episode_log: List[Dict[str, Any]] = Field(default_factory=list, description="Episode log")
+    hallucination_catch_rate: float = Field(default=0.0, description="Hallucination detection rate")
 
 
-class ManagerWorkerEnv(gym.Env):
+class ManagerAction(Action):
+    """Action from the Manager Agent."""
+    
+    action_id: int = Field(..., ge=0, le=6, description="Action ID (0-6)")
+    target_worker_id: Optional[int] = Field(default=None, description="Target worker ID if applicable")
+
+
+class ManagerWorkerState(State):
+    """Internal state of the environment."""
+    
+    workers: List[WorkerStateModel] = Field(default_factory=list)
+    task: Optional[Dict[str, Any]] = None
+    budget_remaining: int = 1000
+    step_counter: int = 0
+    episode_log: List[Dict[str, Any]] = Field(default_factory=list)
+    subtask_status: List[bool] = Field(default_factory=list)
+    subtask_assignments: List[Optional[int]] = Field(default_factory=list)
+    hallucination_catch_rate: float = 0.0
+    hallucinations_detected: int = 0
+    hallucinations_approved: int = 0
+    false_positives: int = 0
+    max_workers: int = 4
+    max_steps: int = 50
+    token_budget: int = 1000
+    task_difficulty: int = 3
+    failure_injection_rate: float = 0.6
+
+
+# ============================================================================
+# Main Environment Class
+# ============================================================================
+
+class ManagerWorkerEnv(Environment):
     """
-    Multi-agent RL environment with Manager coordinating Workers.
+    Multi-agent RL environment with Manager coordinating Workers using OpenEnv.
     
-    Inherits from gym.Env and implements standard gym interface.
+    Inherits from openenv.core.Environment and implements the OpenEnv interface.
     """
     
     # Action names for reference
@@ -93,7 +111,7 @@ class ManagerWorkerEnv(gym.Env):
         6: 20,   # request_clarification
     }
     
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initialize environment with configuration.
         
@@ -108,6 +126,7 @@ class ManagerWorkerEnv(gym.Env):
         super().__init__()
         
         # Configuration
+        config = config or {}
         self.max_workers = config.get('max_workers', 4)
         self.max_steps = config.get('max_steps', 50)
         self.token_budget = config.get('token_budget', 1000)
@@ -126,129 +145,114 @@ class ManagerWorkerEnv(gym.Env):
         self.hallucination_engine = HallucinationEngine()
         self.reward_calculator = RewardCalculator()
         
-        # Define observation space
-        self.observation_space = spaces.Dict({
-            'task_embedding': spaces.Box(
-                low=-1.0, high=1.0,
-                shape=(64,), dtype=np.float32
-            ),
-            'worker_states': spaces.Box(
-                low=0.0, high=1.0,
-                shape=(4, 5), dtype=np.float32
-            ),
-            'subtask_status': spaces.MultiBinary(4),
-            'budget_remaining': spaces.Box(
-                low=0.0, high=1.0,
-                shape=(1,), dtype=np.float32
-            ),
-            'steps_remaining': spaces.Box(
-                low=0.0, high=1.0,
-                shape=(1,), dtype=np.float32
-            ),
-        })
-        
-        # Define action space
-        self.action_space = spaces.Discrete(7)
-        
-        # Initialize internal state
-        self.workers: List[WorkerState] = []
-        self.task: Optional[Task] = None
-        self.budget_remaining: int = self.token_budget
-        self.step_counter: int = 0
-        self.episode_log = EpisodeLog()
-        
-        # Episode tracking
-        self.subtask_status: List[bool] = []  # True if subtask complete
-        self.subtask_assignments: List[Optional[int]] = []  # worker_id assigned to each subtask
-        self.hallucination_catch_rate: float = 0.0
-        self.hallucinations_detected: int = 0
-        self.hallucinations_approved: int = 0
-        self.false_positives: int = 0
-        
-    def reset(self) -> Dict[str, np.ndarray]:
+        # Initialize state
+        self._state = ManagerWorkerState(
+            max_workers=self.max_workers,
+            max_steps=self.max_steps,
+            token_budget=self.token_budget,
+            task_difficulty=self.task_difficulty,
+            failure_injection_rate=self.failure_injection_rate,
+        )
+    
+    @property
+    def state(self) -> ManagerWorkerState:
+        """Get the current environment state."""
+        return self._state
+    
+    @state.setter
+    def state(self, value: ManagerWorkerState) -> None:
+        """Set the environment state."""
+        self._state = value
+    
+    def reset(self) -> ManagerWorkerObservation:
         """
         Reset environment to initial state.
         
         Returns:
-            observation: Dictionary with keys:
-                - task_embedding: np.ndarray shape (64,), dtype float32, range [-1, 1]
-                - worker_states: np.ndarray shape (4, 5), dtype float32
-                - subtask_status: np.ndarray shape (4,), dtype int32, values {0, 1}
-                - budget_remaining: float, range [0, 1]
-                - steps_remaining: float, range [0, 1]
+            observation: ManagerWorkerObservation with initial state
         """
         # Select random task from task library
-        self.task = self.task_library.sample_task(difficulty=self.task_difficulty)
+        task = self.task_library.sample_task(difficulty=self.task_difficulty)
+        self.state.task = {
+            'task_id': task.task_id,
+            'task_type': task.task_type,
+            'description': task.description,
+            'difficulty': task.difficulty,
+            'estimated_tokens': task.estimated_tokens,
+            'num_subtasks': len(task.subtasks),
+        }
         
         # Initialize workers with random skill levels
-        self.workers = []
+        self.state.workers = []
         for i in range(self.max_workers):
             skill_level = np.random.uniform(0.3, 1.0)
-            worker = WorkerState(
+            worker = WorkerStateModel(
                 worker_id=i,
                 is_active=False,
                 skill_level=skill_level,
             )
-            self.workers.append(worker)
+            self.state.workers.append(worker)
         
         # Reset budget and counters
-        self.budget_remaining = self.token_budget
-        self.step_counter = 0
-        self.episode_log = EpisodeLog()
+        self.state.budget_remaining = self.token_budget
+        self.state.step_counter = 0
+        self.state.episode_log = []
         
         # Initialize subtask tracking
-        num_subtasks = len(self.task.subtasks)
-        self.subtask_status = [False] * num_subtasks
-        self.subtask_assignments = [None] * num_subtasks
+        num_subtasks = len(task.subtasks)
+        self.state.subtask_status = [False] * num_subtasks
+        self.state.subtask_assignments = [None] * num_subtasks
         
         # Reset hallucination tracking
-        self.hallucination_catch_rate = 0.0
-        self.hallucinations_detected = 0
-        self.hallucinations_approved = 0
-        self.false_positives = 0
+        self.state.hallucination_catch_rate = 0.0
+        self.state.hallucinations_detected = 0
+        self.state.hallucinations_approved = 0
+        self.state.false_positives = 0
         
         # Generate and return initial observation
         return self._generate_observation()
     
-    def step(self, action: int) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
+    def step(self, action: ManagerAction) -> Tuple[ManagerWorkerObservation, float, bool, Dict[str, Any]]:
         """
         Execute one step of environment.
         
         Args:
-            action: int in range [0, 6], representing discrete action
+            action: ManagerAction with action_id and optional target_worker_id
         
         Returns:
-            observation: Updated observation dictionary
-            reward: float, cumulative reward for this step
-            done: bool, True if episode terminates
-            info: Dict with metadata (task_quality, tokens_used, etc.)
+            observation: Updated observation
+            reward: float reward for this step
+            done: bool indicating episode termination
+            info: Dict with metadata
         """
+        action_id = action.action_id
+        
         # Validate action
-        if not self.action_space.contains(action):
-            raise ValueError(f"Invalid action: {action}. Must be in range [0, 6]")
+        if not (0 <= action_id <= 6):
+            raise ValueError(f"Invalid action: {action_id}. Must be in range [0, 6]")
         
         # Check if action is affordable
-        action_cost = self.ACTION_COSTS[action]
-        if self.budget_remaining < action_cost:
+        action_cost = self.ACTION_COSTS[action_id]
+        if self.state.budget_remaining < action_cost:
             # Action rejected due to insufficient budget
             reward = -1.0
             done = True
             info = {
                 'action_valid': False,
                 'reason': 'insufficient_budget',
-                'budget_remaining': self.budget_remaining,
+                'budget_remaining': self.state.budget_remaining,
                 'action_cost': action_cost,
             }
             return self._generate_observation(), reward, done, info
         
         # Execute action
-        self._execute_action(action)
+        self._execute_action(action_id, action.target_worker_id)
         
         # Deduct tokens from budget
-        self.budget_remaining -= action_cost
+        self.state.budget_remaining -= action_cost
         
         # Increment step counter
-        self.step_counter += 1
+        self.state.step_counter += 1
         
         # Check episode termination conditions
         done = self._check_termination()
@@ -256,13 +260,13 @@ class ManagerWorkerEnv(gym.Env):
         # Calculate reward
         reward = self.reward_calculator.calculate_reward(
             final_quality=self._compute_final_quality() if done else 0.0,
-            steps_used=self.step_counter,
+            steps_used=self.state.step_counter,
             max_steps=self.max_steps,
-            tokens_used=self.token_budget - self.budget_remaining,
+            tokens_used=self.token_budget - self.state.budget_remaining,
             token_budget=self.token_budget,
-            hallucination_interventions=self.hallucinations_detected,
-            hallucination_approvals=self.hallucinations_approved,
-            false_positives=self.false_positives,
+            hallucination_interventions=self.state.hallucinations_detected,
+            hallucination_approvals=self.state.hallucinations_approved,
+            false_positives=self.state.false_positives,
         )
         
         # Generate observation
@@ -271,17 +275,21 @@ class ManagerWorkerEnv(gym.Env):
         # Create info dictionary
         info = {
             'action_valid': True,
-            'action': action,
-            'action_name': self.ACTION_NAMES[action],
+            'action': action_id,
+            'action_name': self.ACTION_NAMES[action_id],
             'action_cost': action_cost,
-            'budget_remaining': self.budget_remaining,
-            'step': self.step_counter,
-            'episode_log': self.episode_log.to_dict(),
-            'hallucination_catch_rate': self.hallucination_catch_rate,
+            'budget_remaining': self.state.budget_remaining,
+            'step': self.state.step_counter,
+            'hallucination_catch_rate': self.state.hallucination_catch_rate,
         }
         
         # Log step
-        self.episode_log.add_step(self.step_counter, action, reward, info)
+        self.state.episode_log.append({
+            'step': self.state.step_counter,
+            'action': action_id,
+            'reward': reward,
+            'info': info,
+        })
         
         return observation, reward, done, info
     
@@ -298,13 +306,14 @@ class ManagerWorkerEnv(gym.Env):
         if mode == 'human':
             output = []
             output.append("=" * 80)
-            output.append(f"Step {self.step_counter}/{self.max_steps}")
-            output.append(f"Budget: {self.budget_remaining}/{self.token_budget} tokens")
-            output.append(f"Task: {self.task.task_type if self.task else 'None'}")
-            output.append(f"Subtasks: {sum(self.subtask_status)}/{len(self.subtask_status)} complete")
+            output.append(f"Step {self.state.step_counter}/{self.max_steps}")
+            output.append(f"Budget: {self.state.budget_remaining}/{self.token_budget} tokens")
+            if self.state.task:
+                output.append(f"Task: {self.state.task['task_type']}")
+                output.append(f"Subtasks: {sum(self.state.subtask_status)}/{self.state.task['num_subtasks']} complete")
             output.append("")
             
-            for worker in self.workers:
+            for worker in self.state.workers:
                 status = "ACTIVE" if worker.is_active else "IDLE"
                 output.append(
                     f"Worker {worker.worker_id}: {status} | "
@@ -318,7 +327,7 @@ class ManagerWorkerEnv(gym.Env):
         
         return None
     
-    def _execute_action(self, action: int) -> None:
+    def _execute_action(self, action: int, target_worker_id: Optional[int] = None) -> None:
         """Execute manager action and update environment state."""
         if action == 0:  # assign_subtask
             self._action_assign_subtask()
@@ -337,71 +346,60 @@ class ManagerWorkerEnv(gym.Env):
     
     def _action_assign_subtask(self) -> None:
         """Assign next unassigned subtask to an idle worker."""
-        # Find next unassigned subtask
-        for i, assigned in enumerate(self.subtask_assignments):
-            if assigned is None and not self.subtask_status[i]:
-                # Find idle worker
-                for worker in self.workers:
+        for i, assigned in enumerate(self.state.subtask_assignments):
+            if assigned is None and not self.state.subtask_status[i]:
+                for worker in self.state.workers:
                     if not worker.is_active:
                         worker.is_active = True
                         worker.current_subtask_id = i
                         worker.progress = 0.0
                         worker.output_buffer = ""
                         worker.patience_counter = 0
-                        self.subtask_assignments[i] = worker.worker_id
+                        self.state.subtask_assignments[i] = worker.worker_id
                         break
                 break
     
     def _action_check_worker_output(self) -> None:
         """Check active worker's output quality."""
-        # Find first active worker
-        for worker in self.workers:
+        for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
-                # Simulate checking output
                 worker.output_quality_if_checked = np.random.uniform(0.0, 1.0)
                 break
     
     def _action_correct_worker(self) -> None:
         """Send corrective instructions to a worker."""
-        # Find first active worker
-        for worker in self.workers:
+        for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
-                # Improve output quality
                 improvement = np.random.uniform(0.2, 0.5)
                 worker.output_quality_if_checked = min(1.0, worker.output_quality_if_checked + improvement)
                 break
     
     def _action_reassign_task(self) -> None:
         """Reassign current subtask to different worker."""
-        # Find active worker
-        for worker in self.workers:
+        for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
                 subtask_id = worker.current_subtask_id
-                # Reset worker
                 worker.is_active = False
                 worker.current_subtask_id = None
                 worker.progress = 0.0
                 worker.output_buffer = ""
-                # Find idle worker to reassign to
-                for other_worker in self.workers:
+                for other_worker in self.state.workers:
                     if not other_worker.is_active:
                         other_worker.is_active = True
                         other_worker.current_subtask_id = subtask_id
                         other_worker.progress = 0.0
                         other_worker.output_buffer = ""
-                        self.subtask_assignments[subtask_id] = other_worker.worker_id
+                        self.state.subtask_assignments[subtask_id] = other_worker.worker_id
                         break
                 break
     
     def _action_fire_and_replace(self) -> None:
         """Replace a worker with a new one."""
-        # Find first active worker
-        for i, worker in enumerate(self.workers):
+        for i, worker in enumerate(self.state.workers):
             if worker.is_active:
                 subtask_id = worker.current_subtask_id
-                # Replace worker
                 new_skill = np.random.uniform(0.3, 1.0)
-                self.workers[i] = WorkerState(
+                self.state.workers[i] = WorkerStateModel(
                     worker_id=i,
                     is_active=True if subtask_id is not None else False,
                     current_subtask_id=subtask_id,
@@ -411,36 +409,30 @@ class ManagerWorkerEnv(gym.Env):
     
     def _action_approve_output(self) -> None:
         """Approve active worker's output and mark subtask complete."""
-        # Find first active worker
-        for worker in self.workers:
+        for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
                 subtask_id = worker.current_subtask_id
-                self.subtask_status[subtask_id] = True
+                self.state.subtask_status[subtask_id] = True
                 worker.is_active = False
                 worker.current_subtask_id = None
                 break
     
     def _action_request_clarification(self) -> None:
         """Request clarification about task structure."""
-        # This action increases task embedding specificity (no-op for now)
         pass
     
     def _check_termination(self) -> bool:
         """Check if episode should terminate."""
-        # Terminate if max steps reached
-        if self.step_counter >= self.max_steps:
+        if self.state.step_counter >= self.max_steps:
             return True
         
-        # Terminate if budget exhausted
-        if self.budget_remaining <= 0:
+        if self.state.budget_remaining <= 0:
             return True
         
-        # Terminate if all subtasks completed
-        if all(self.subtask_status):
+        if all(self.state.subtask_status):
             return True
         
-        # Terminate if worker stuck (patience counter too high)
-        for worker in self.workers:
+        for worker in self.state.workers:
             if worker.patience_counter > 10:
                 return True
         
@@ -448,18 +440,17 @@ class ManagerWorkerEnv(gym.Env):
     
     def _compute_final_quality(self) -> float:
         """Compute final quality score from completed subtasks."""
-        if not self.task or not self.task.subtasks:
+        if not self.state.task or self.state.task['num_subtasks'] == 0:
             return 0.0
         
         total_quality = 0.0
         completed_count = 0
         
-        for i, subtask in enumerate(self.task.subtasks):
-            if self.subtask_status[i]:
-                # Get worker that completed this subtask
-                worker_id = self.subtask_assignments[i]
+        for i, is_complete in enumerate(self.state.subtask_status):
+            if is_complete:
+                worker_id = self.state.subtask_assignments[i]
                 if worker_id is not None:
-                    worker = self.workers[worker_id]
+                    worker = self.state.workers[worker_id]
                     total_quality += worker.output_quality_if_checked
                     completed_count += 1
         
@@ -468,49 +459,52 @@ class ManagerWorkerEnv(gym.Env):
         
         return total_quality / completed_count
     
-    def _generate_observation(self) -> Dict[str, np.ndarray]:
-        """
-        Generate observation dictionary from current environment state.
-        
-        Returns:
-            Dict with 5 keys as specified in observation_space
-        """
-        # Generate task embedding (64-dim, normalized to [-1, 1])
-        if self.task:
-            task_embedding = self._get_task_embedding(self.task.task_type)
+    def _generate_observation(self) -> ManagerWorkerObservation:
+        """Generate observation from current environment state."""
+        # Generate task embedding
+        if self.state.task:
+            task_embedding = self._get_task_embedding(self.state.task['task_type'])
         else:
-            task_embedding = np.zeros(64, dtype=np.float32)
+            task_embedding = [0.0] * 64
         
         # Generate worker states (4x5 array)
-        worker_states = np.zeros((4, 5), dtype=np.float32)
-        for i, worker in enumerate(self.workers):
-            tokens_consumed_ratio = (self.token_budget - self.budget_remaining) / self.token_budget if self.token_budget > 0 else 0.0
-            worker_states[i] = np.array([
+        worker_states = []
+        for worker in self.state.workers:
+            tokens_consumed_ratio = (self.token_budget - self.state.budget_remaining) / self.token_budget if self.token_budget > 0 else 0.0
+            worker_state = [
                 float(worker.is_active),
                 worker.progress,
                 worker.hallucination_risk_score,
                 worker.output_quality_if_checked,
                 tokens_consumed_ratio,
-            ], dtype=np.float32)
+            ]
+            worker_states.append(worker_state)
         
-        # Generate subtask status (binary array)
-        subtask_status = np.array(self.subtask_status[:4], dtype=np.int32)
+        # Pad to 4 workers if needed
+        while len(worker_states) < 4:
+            worker_states.append([0.0] * 5)
         
-        # Generate budget and steps remaining (normalized to [0, 1])
-        budget_remaining = np.array([self.budget_remaining / self.token_budget], dtype=np.float32)
-        steps_remaining = np.array([(self.max_steps - self.step_counter) / self.max_steps], dtype=np.float32)
+        # Generate subtask status
+        subtask_status = [int(s) for s in self.state.subtask_status[:4]]
+        while len(subtask_status) < 4:
+            subtask_status.append(0)
         
-        return {
-            'task_embedding': task_embedding,
-            'worker_states': worker_states,
-            'subtask_status': subtask_status,
-            'budget_remaining': budget_remaining,
-            'steps_remaining': steps_remaining,
-        }
+        # Generate budget and steps remaining
+        budget_remaining = self.state.budget_remaining / self.token_budget if self.token_budget > 0 else 0.0
+        steps_remaining = (self.max_steps - self.state.step_counter) / self.max_steps if self.max_steps > 0 else 0.0
+        
+        return ManagerWorkerObservation(
+            task_embedding=task_embedding,
+            worker_states=worker_states,
+            subtask_status=subtask_status,
+            budget_remaining=budget_remaining,
+            steps_remaining=steps_remaining,
+            episode_log=self.state.episode_log,
+            hallucination_catch_rate=self.state.hallucination_catch_rate,
+        )
     
-    def _get_task_embedding(self, task_type: str) -> np.ndarray:
+    def _get_task_embedding(self, task_type: str) -> List[float]:
         """Get fixed embedding for task type."""
-        # Simple lookup table for task embeddings
         embeddings = {
             'web_development': np.random.RandomState(hash(task_type) % 2**32).uniform(-1, 1, 64),
             'research': np.random.RandomState(hash(task_type) % 2**32).uniform(-1, 1, 64),
@@ -518,4 +512,5 @@ class ManagerWorkerEnv(gym.Env):
             'product_management': np.random.RandomState(hash(task_type) % 2**32).uniform(-1, 1, 64),
             'academic_writing': np.random.RandomState(hash(task_type) % 2**32).uniform(-1, 1, 64),
         }
-        return embeddings.get(task_type, np.zeros(64, dtype=np.float32)).astype(np.float32)
+        embedding = embeddings.get(task_type, np.zeros(64))
+        return embedding.astype(float).tolist()
