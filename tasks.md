@@ -6,12 +6,12 @@ This is a reinforcement learning training environment built on OpenEnv that simu
 
 ## Part 1: Environment Core (env/ folder) - Foundation Tasks
 
-- [ ] 1.1 Create project structure and base files
+- [x] 1.1 Create project structure and base files
   - Create root folder manager-worker-env with subfolders: env, agents, training, backend, frontend
   - Create env/__init__.py, env/manager_worker_env.py, env/hallucination_engine.py, env/task_library.py, env/reward_calculator.py
   - _Requirements: 1.1, 1.2_
 
-- [ ] 1.2 Implement ManagerWorkerEnv class - Core environment
+- [x] 1.2 Implement ManagerWorkerEnv class - Core environment
   - Implement __init__ accepting config dict with max_workers, max_steps, token_budget, task_difficulty, failure_injection_rate
   - Define observation_space and action_space using gym.spaces
   - Initialize internal state: workers, task, budget, step_counter, episode_log
