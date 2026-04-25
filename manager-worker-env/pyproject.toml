@@ -1,0 +1,213 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manager-worker-env"
+version = "0.1.0"
+description = "AI Manager + Worker Multi-Agent Reinforcement Learning Environment"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = [
+    "reinforcement-learning",
+    "multi-agent",
+    "manager-worker",
+    "openenv",
+    "ppo",
+    "stable-baselines3"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "openenv-core>=0.2.3",
+    "gymnasium>=0.29.1",
+    "stable-baselines3>=2.0.0",
+    "torch>=2.3.0",
+    "numpy>=1.18.0",
+    "pandas>=1.0.0",
+    "matplotlib>=3.0.0",
+    "wandb>=0.12.0",
+    "tensorboard>=2.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "websockets>=15.0.1",
+    "pydantic>=2.0.0",
+    "requests>=2.25.0",
+    "huggingface-hub>=0.20.0",
+    "python-dotenv>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "isort>=5.12.0",
+    "pre-commit>=3.0.0",
+]
+
+docs = [
+    "sphinx>=5.0.0",
+    "sphinx-rtd-theme>=1.0.0",
+    "sphinx-autodoc-typehints>=1.20.0",
+]
+
+training = [
+    "tensorboard>=2.0.0",
+    "wandb>=0.12.0",
+    "huggingface-hub>=0.20.0",
+]
+
+backend = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "websockets>=15.0.1",
+    "motor>=3.0.0",
+    "pymongo>=4.0.0",
+]
+
+all = [
+    "manager-worker-env[dev,docs,training,backend]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/openenv-multiagent"
+Documentation = "https://github.com/yourusername/openenv-multiagent/blob/main/README.md"
+Repository = "https://github.com/yourusername/openenv-multiagent.git"
+"Bug Tracker" = "https://github.com/yourusername/openenv-multiagent/issues"
+
+[project.scripts]
+manager-worker-env = "manager_worker_env.cli:main"
+train-manager = "training.train_manager:main"
+run-training = "training.run_training:main"
+server = "server.app:main"
+
+[tool.setuptools]
+packages = ["env", "training", "BE", "server"]
+
+[tool.setuptools.package-data]
+env = ["*.py"]
+training = ["*.py"]
+BE = ["*.py"]
+server = ["*.py"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312', 'py313', 'py314']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | venv
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+known_first_party = ["env", "training", "BE"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "gymnasium.*",
+    "stable_baselines3.*",
+    "torch.*",
+    "numpy.*",
+    "pandas.*",
+    "matplotlib.*",
+    "wandb.*",
+    "tensorboard.*",
+    "fastapi.*",
+    "uvicorn.*",
+    "websockets.*",
+    "pydantic.*",
+    "requests.*",
+    "huggingface_hub.*",
+    "dotenv.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-v --cov=env --cov=training --cov=BE --cov-report=html --cov-report=term-missing"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.coverage.run]
+source = ["env", "training", "BE"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.pylint.messages_control]
+disable = [
+    "C0330", "C0326",  # Bad whitespace
+    "R0903",           # Too few public methods
+    "R0913",           # Too many arguments
+    "W0212",           # Protected access
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.design]
+max-attributes = 10
+max-arguments = 10

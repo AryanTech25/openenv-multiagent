@@ -1,0 +1,248 @@
+# OpenEnv Configuration File
+# This file defines the environment metadata and configuration for the Manager-Worker RL Environment
+
+name: manager-worker-env
+version: 0.1.0
+description: "AI Manager + Worker Multi-Agent Reinforcement Learning Environment"
+
+# Environment metadata
+metadata:
+  author: "Your Name"
+  email: "your.email@example.com"
+  license: "MIT"
+  repository: "https://github.com/yourusername/openenv-multiagent"
+  documentation: "https://github.com/yourusername/openenv-multiagent/blob/main/README.md"
+  keywords:
+    - reinforcement-learning
+    - multi-agent
+    - manager-worker
+    - openenv
+    - ppo
+
+# Environment class configuration
+environment:
+  # Main environment class
+  class: "env.manager_worker_env.ManagerWorkerEnv"
+  
+  # Module path for imports
+  module: "env"
+  
+  # Environment type
+  type: "multi-agent"
+  
+  # Observation space configuration
+  observation_space:
+    type: "dict"
+    components:
+      - name: "task_embedding"
+        type: "box"
+        shape: [64]
+        dtype: "float32"
+        bounds: [-1.0, 1.0]
+      - name: "worker_states"
+        type: "box"
+        shape: [4, 5]
+        dtype: "float32"
+        bounds: [0.0, 1.0]
+      - name: "subtask_status"
+        type: "multibinary"
+        shape: [4]
+      - name: "budget_remaining"
+        type: "box"
+        shape: [1]
+        dtype: "float32"
+        bounds: [0.0, 1.0]
+      - name: "steps_remaining"
+        type: "box"
+        shape: [1]
+        dtype: "float32"
+        bounds: [0.0, 1.0]
+  
+  # Action space configuration
+  action_space:
+    type: "discrete"
+    n: 7
+    actions:
+      - id: 0
+        name: "assign_subtask"
+        cost: 10
+      - id: 1
+        name: "check_worker_output"
+        cost: 50
+      - id: 2
+        name: "correct_worker"
+        cost: 30
+      - id: 3
+        name: "reassign_task"
+        cost: 40
+      - id: 4
+        name: "fire_and_replace"
+        cost: 100
+      - id: 5
+        name: "approve_output"
+        cost: 5
+      - id: 6
+        name: "request_clarification"
+        cost: 20
+  
+  # Reward configuration
+  reward:
+    type: "multi-component"
+    components:
+      - name: "quality_reward"
+        weight: 50.0
+        description: "Reward for task quality"
+      - name: "time_efficiency"
+        weight: 10.0
+        description: "Reward for completing tasks quickly"
+      - name: "budget_efficiency"
+        weight: -5.0
+        description: "Penalty for exceeding budget"
+      - name: "hallucination_detection"
+        weight: 15.0
+        description: "Reward for detecting hallucinations"
+      - name: "step_cost"
+        weight: -0.5
+        description: "Cost per step"
+
+# Training configuration
+training:
+  # Algorithm
+  algorithm: "PPO"
+  
+  # Framework
+  framework: "stable-baselines3"
+  
+  # Default hyperparameters
+  hyperparameters:
+    learning_rate: 3e-4
+    n_steps: 2048
+    batch_size: 64
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.0
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+  
+  # Training configuration
+  config:
+    total_timesteps: 50000
+    log_interval: 10
+    save_interval: 1000
+    eval_interval: 5000
+
+# Logging configuration
+logging:
+  tensorboard:
+    enabled: true
+    log_dir: "logs/tensorboard"
+  
+  wandb:
+    enabled: false
+    project: "manager-worker-rl"
+    entity: null
+  
+  console:
+    enabled: true
+    level: "INFO"
+
+# Model deployment configuration
+deployment:
+  huggingface:
+    enabled: true
+    repo_id: null
+    private: false
+  
+  docker:
+    enabled: false
+    image_name: "manager-worker-env"
+    tag: "latest"
+
+# Task library configuration
+tasks:
+  library_path: "env/task_library.py"
+  num_tasks: 15
+  domains:
+    - "Web Development"
+    - "Research"
+    - "Software Engineering"
+    - "Product Management"
+    - "Academic Writing"
+
+# Failure modes configuration
+failure_modes:
+  - name: "hallucination"
+    probability: 0.3
+    plausibility_range: [0.8, 0.95]
+    quality_range: [0.1, 0.3]
+  
+  - name: "off_task"
+    probability: 0.2
+    plausibility_range: [0.4, 0.6]
+    quality_range: [0.0, 0.1]
+  
+  - name: "incomplete"
+    probability: 0.25
+    plausibility_range: [0.5, 0.6]
+    quality_range: [0.2, 0.5]
+  
+  - name: "stuck"
+    probability: 0.15
+    description: "Worker gets stuck in a loop"
+
+# Development configuration
+development:
+  # Testing
+  testing:
+    enabled: true
+    test_dir: "tests"
+    framework: "pytest"
+  
+  # Code quality
+  code_quality:
+    enabled: true
+    tools:
+      - "black"
+      - "flake8"
+      - "mypy"
+  
+  # Documentation
+  documentation:
+    enabled: true
+    format: "markdown"
+    output_dir: "docs"
+
+# API configuration (for backend)
+api:
+  enabled: true
+  framework: "fastapi"
+  host: "0.0.0.0"
+  port: 8000
+  
+  endpoints:
+    - path: "/episode"
+      methods: ["GET", "POST"]
+    - path: "/episode/{episode_id}"
+      methods: ["GET", "PUT", "DELETE"]
+    - path: "/training/metrics"
+      methods: ["GET"]
+    - path: "/ws/live"
+      methods: ["WebSocket"]
+
+# Environment constraints
+constraints:
+  max_episode_length: 500
+  max_workers: 4
+  max_subtasks: 4
+  budget_limit: 1000
+  action_cost_multiplier: 1.0
+
+# Performance tuning
+performance:
+  num_envs: 1
+  num_threads: 4
+  use_gpu: true
+  batch_size: 64
+  buffer_size: 100000

@@ -21,6 +21,7 @@ import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.policies import MultiInputActorCriticPolicy
 
 from env import ManagerWorkerEnv, ManagerAction
 
@@ -218,7 +219,7 @@ def train_manager(
     # Create PPO model
     print(f"Creating PPO model...")
     model = PPO(
-        policy='MultiInputPolicy',
+        policy='MultiInputPolicy',  # Correct policy for Dict observation spaces
         env=env,
         learning_rate=config.learning_rate,
         n_steps=config.n_steps,
