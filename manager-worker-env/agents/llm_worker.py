@@ -2,6 +2,7 @@
 Generic Hugging Face Worker Agent for multi-agent coordination.
 """
 
+import os
 import torch
 from typing import Optional, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
@@ -10,6 +11,15 @@ import logging
 import random
 
 logger = logging.getLogger(__name__)
+
+
+def _is_offline() -> bool:
+    """True if the user / env wants us to use local cache only."""
+    for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        v = os.environ.get(var, "")
+        if v and v not in ("0", "false", "False"):
+            return True
+    return False
 
 
 class HFWorkerConfig:
@@ -75,9 +85,17 @@ class HFWorker:
         self._load_model()
     
     def _load_model(self) -> None:
-        """Load model and tokenizer from Hugging Face."""
+        """Load model and tokenizer from Hugging Face.
+
+        We auto-fall-back to ``local_files_only=True`` whenever the network
+        round-trip fails (e.g. the HF Hub returns 401 when looking up
+        ``additional_chat_templates`` for an unauthenticated user). This keeps
+        the demo working with cached weights even without an HF token.
+        """
         logger.info(f"Loading {self.config.model_id} on {self.device}...")
-        
+
+        offline_pref = _is_offline() or not self.config.hf_token
+
         # Configure 8-bit quantization if enabled
         quantization_config = None
         if self.config.use_8bit and self.device == "cuda":
@@ -85,21 +103,22 @@ class HFWorker:
                 load_in_8bit=True,
                 llm_int8_threshold=6.0,
             )
-        
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
+
+        self.tokenizer = self._load_with_offline_fallback(
+            AutoTokenizer.from_pretrained,
             self.config.model_id,
-            token=self.config.hf_token,
-            trust_remote_code=True,
+            kwargs=dict(token=self.config.hf_token, trust_remote_code=True),
+            prefer_offline=offline_pref,
+            label="tokenizer",
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
+
         # Load model (try flash attention on CUDA; fall back to "eager" if flash-attn is missing)
         attn = "eager"
         if self.config.use_flash_attention and self.device == "cuda":
             attn = "flash_attention_2"
-            
+
         load_kw = dict(
             quantization_config=quantization_config,
             device_map="auto" if self.device == "cuda" else None,
@@ -108,10 +127,14 @@ class HFWorker:
             attn_implementation=attn,
             token=self.config.hf_token,
         )
-        
+
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model_id, **load_kw
+            self.model = self._load_with_offline_fallback(
+                AutoModelForCausalLM.from_pretrained,
+                self.config.model_id,
+                kwargs=load_kw,
+                prefer_offline=offline_pref,
+                label="model",
             )
         except Exception as e:
             if attn == "flash_attention_2":
@@ -120,17 +143,54 @@ class HFWorker:
                     e,
                 )
                 load_kw["attn_implementation"] = "eager"
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.config.model_id, **load_kw
+                self.model = self._load_with_offline_fallback(
+                    AutoModelForCausalLM.from_pretrained,
+                    self.config.model_id,
+                    kwargs=load_kw,
+                    prefer_offline=offline_pref,
+                    label="model",
                 )
             else:
                 raise
-        
+
         if self.device == "cpu":
             self.model = self.model.to(self.device)
-        
+
         self.model.eval()
         logger.info(f"✓ Model {self.config.model_id} loaded successfully on {self.device}")
+
+    @staticmethod
+    def _load_with_offline_fallback(loader, model_id: str, *, kwargs: Dict[str, Any], prefer_offline: bool, label: str):
+        """
+        Call a transformers/HF loader, retrying with ``local_files_only=True``
+        if the online attempt fails on a network/auth error. If we already
+        prefer offline (e.g. HF_HUB_OFFLINE set, or no token available) we go
+        straight to the local-cache attempt first.
+        """
+        attempts = []
+        if prefer_offline:
+            attempts.append({**kwargs, "local_files_only": True})
+            attempts.append(kwargs)
+        else:
+            attempts.append(kwargs)
+            attempts.append({**kwargs, "local_files_only": True})
+
+        last_exc: Optional[Exception] = None
+        for i, kw in enumerate(attempts):
+            try:
+                return loader(model_id, **kw)
+            except Exception as exc:  # noqa: BLE001 — broad on purpose
+                last_exc = exc
+                if i + 1 < len(attempts):
+                    logger.warning(
+                        "Loading %s for %s failed (%s); retrying with local_files_only=%s",
+                        label,
+                        model_id,
+                        exc.__class__.__name__,
+                        attempts[i + 1].get("local_files_only", False),
+                    )
+        # All attempts failed.
+        raise last_exc  # type: ignore[misc]
     
     def work_on_task(self, subtask: Dict[str, Any]) -> str:
         """

@@ -54,8 +54,10 @@ class ManagerWorkerObservation(Observation):
     """Observation from the environment."""
     
     task_embedding: List[float] = Field(..., description="64-dimensional task embedding")
-    worker_states: List[List[float]] = Field(..., description="4x5 worker states array")
-    subtask_status: List[int] = Field(..., description="Binary array of subtask completion")
+    worker_states: List[List[float]] = Field(..., description="4x5 worker states array (padded)")
+    num_workers: float = Field(default=1.0, description="Number of real workers in this env, normalized to [0, 1] over the 4-row max")
+    subtask_status: List[int] = Field(..., description="Binary array of subtask completion (padded to MAX_OBSERVABLE_SUBTASKS)")
+    num_subtasks: float = Field(default=0.0, description="Number of real subtasks for this task, normalized to [0, 1]")
     budget_remaining: float = Field(..., description="Remaining budget as fraction [0, 1]")
     steps_remaining: float = Field(..., description="Remaining steps as fraction [0, 1]")
     episode_log: List[Dict[str, Any]] = Field(default_factory=list, description="Episode log")
@@ -100,7 +102,12 @@ class ManagerWorkerEnv(Environment):
     
     Inherits from openenv.core.Environment and implements the OpenEnv interface.
     """
-    
+
+    # How many subtasks the observation exposes. Tasks in the library have up
+    # to 5 subtasks today; we keep some headroom so adding longer tasks doesn't
+    # silently hide work from the manager.
+    MAX_OBSERVABLE_SUBTASKS = 8
+
     # Action names for reference
     ACTION_NAMES = [
         'assign_subtask',      # 0: 10 tokens
@@ -342,11 +349,15 @@ class ManagerWorkerEnv(Environment):
         Render environment state for visualization.
         
         Args:
-            mode: 'human' for console, 'rgb_array' for image
+            mode: 'human' for the simple multi-line view,
+                  'dashboard' for a one-screen multi-worker table.
         
         Returns:
             Rendered output or None
         """
+        if mode == 'dashboard':
+            return self._render_dashboard()
+
         if mode == 'human':
             output = []
             output.append("=" * 80)
@@ -370,6 +381,56 @@ class ManagerWorkerEnv(Environment):
             return "\n".join(output)
         
         return None
+
+    def _render_dashboard(self) -> str:
+        """One-screen view of the whole multi-agent system."""
+        rows: List[str] = []
+        rows.append("┌" + "─" * 96 + "┐")
+        task_label = self.state.task['task_type'] if self.state.task else '?'
+        completed = sum(self.state.subtask_status)
+        total = self.state.task['num_subtasks'] if self.state.task else 0
+        rows.append(
+            f"│ step {self.state.step_counter:>3}/{self.max_steps}   "
+            f"budget {self.state.budget_remaining:>4}/{self.token_budget}   "
+            f"task {task_label:<22} "
+            f"subtasks {completed}/{total} complete"
+            f"{' ' * 6}│"
+        )
+        # Subtask strip
+        strip = []
+        for i, done in enumerate(self.state.subtask_status):
+            owner = self.state.subtask_assignments[i] if i < len(self.state.subtask_assignments) else None
+            if done:
+                strip.append(f"S{i}:✓")
+            elif owner is not None:
+                strip.append(f"S{i}:w{owner}")
+            else:
+                strip.append(f"S{i}:·")
+        rows.append("│ subtasks: " + "  ".join(strip).ljust(85) + "│")
+        rows.append("├" + "─" * 96 + "┤")
+        rows.append("│ id  state    skill  subtask  failure       q(checked)  actual  output preview" + " " * 9 + "│")
+        rows.append("├" + "─" * 96 + "┤")
+        for w in self.state.workers:
+            state = "ACTIVE " if w.is_active else "idle   "
+            sub = f"S{w.current_subtask_id}" if w.current_subtask_id is not None else "  -"
+            failure = (w.failure_mode or "—")[:12]
+            q_checked = f"{w.output_quality_if_checked:.2f}" if w.is_checked else "  ?"
+            actual = f"{w.actual_quality:.2f}" if w.has_output else "  -"
+            preview = (w.output_buffer or "").replace("\n", " ")[:40]
+            rows.append(
+                f"│ #{w.worker_id}  {state}  {w.skill_level:>4.2f}    {sub:<5}  "
+                f"{failure:<12}     {q_checked:>5}     {actual:>5}  {preview:<40}│"
+            )
+        rows.append("├" + "─" * 96 + "┤")
+        rows.append(
+            f"│ halluc detected={self.state.hallucinations_detected}  "
+            f"approved={self.state.hallucinations_approved}  "
+            f"false_pos={self.state.false_positives}  "
+            f"catch_rate={self.state.hallucination_catch_rate:.2f}"
+            f"{' ' * 22}│"
+        )
+        rows.append("└" + "─" * 96 + "┘")
+        return "\n".join(rows)
     
     def _execute_action(self, action: int, target_worker_id: Optional[int] = None) -> None:
         """Execute manager action and update environment state."""
@@ -646,19 +707,33 @@ class ManagerWorkerEnv(Environment):
         while len(worker_states) < 4:
             worker_states.append([0.0] * 5)
         
-        # Generate subtask status
-        subtask_status = [int(s) for s in self.state.subtask_status[:4]]
-        while len(subtask_status) < 4:
+        # Generate subtask status (padded / truncated to MAX_OBSERVABLE_SUBTASKS)
+        cap = self.MAX_OBSERVABLE_SUBTASKS
+        subtask_status = [int(s) for s in self.state.subtask_status[:cap]]
+        while len(subtask_status) < cap:
             subtask_status.append(0)
         
         # Generate budget and steps remaining
         budget_remaining = self.state.budget_remaining / self.token_budget if self.token_budget > 0 else 0.0
         steps_remaining = (self.max_steps - self.state.step_counter) / self.max_steps if self.max_steps > 0 else 0.0
         
+        num_subtasks_real = len(self.state.subtask_status)
+        num_subtasks_norm = (
+            num_subtasks_real / self.MAX_OBSERVABLE_SUBTASKS
+            if self.MAX_OBSERVABLE_SUBTASKS > 0
+            else 0.0
+        )
+
+        n_workers_real = len(self.state.workers)
+        # Normalized over the obs cap of 4 worker rows.
+        num_workers_norm = max(0.0, min(1.0, n_workers_real / 4.0))
+
         return ManagerWorkerObservation(
             task_embedding=task_embedding,
             worker_states=worker_states,
+            num_workers=num_workers_norm,
             subtask_status=subtask_status,
+            num_subtasks=num_subtasks_norm,
             budget_remaining=budget_remaining,
             steps_remaining=steps_remaining,
             episode_log=self.state.episode_log,

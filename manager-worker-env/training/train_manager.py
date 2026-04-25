@@ -88,7 +88,7 @@ class EnvironmentWrapper(gym.Env):
     
     def _get_observation_space(self):
         """Get observation space compatible with stable-baselines3."""
-        
+        n_sub = ManagerWorkerEnv.MAX_OBSERVABLE_SUBTASKS
         # Create a dict space matching the observation structure
         return gym.spaces.Dict({
             'task_embedding': gym.spaces.Box(
@@ -97,7 +97,13 @@ class EnvironmentWrapper(gym.Env):
             'worker_states': gym.spaces.Box(
                 low=0.0, high=1.0, shape=(4, 5), dtype=np.float32
             ),
-            'subtask_status': gym.spaces.MultiBinary(4),
+            'num_workers': gym.spaces.Box(
+                low=0.0, high=1.0, shape=(1,), dtype=np.float32
+            ),
+            'subtask_status': gym.spaces.MultiBinary(n_sub),
+            'num_subtasks': gym.spaces.Box(
+                low=0.0, high=1.0, shape=(1,), dtype=np.float32
+            ),
             'budget_remaining': gym.spaces.Box(
                 low=0.0, high=1.0, shape=(1,), dtype=np.float32
             ),
@@ -129,7 +135,9 @@ class EnvironmentWrapper(gym.Env):
         return {
             'task_embedding': np.array(obs.task_embedding, dtype=np.float32),
             'worker_states': np.array(obs.worker_states, dtype=np.float32),
+            'num_workers': np.array([obs.num_workers], dtype=np.float32),
             'subtask_status': np.array(obs.subtask_status, dtype=np.int8),
+            'num_subtasks': np.array([obs.num_subtasks], dtype=np.float32),
             'budget_remaining': np.array([obs.budget_remaining], dtype=np.float32),
             'steps_remaining': np.array([obs.steps_remaining], dtype=np.float32),
         }

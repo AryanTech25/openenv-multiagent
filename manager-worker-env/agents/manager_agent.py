@@ -62,6 +62,126 @@ class HeuristicManagerAgent:
         return ManagerAction(action_id=action_id)
 
 
+class ParallelManagerAgent:
+    """
+    Observation-driven manager that actually *uses* the worker pool in parallel.
+
+    Strategy:
+      1. While there are unassigned subtasks AND idle workers, ``assign_subtask``.
+         (This fans the work out across as many workers as the env allows.)
+      2. Once everyone is busy (or no work is left to assign), iterate through
+         active workers: ``check_worker_output`` then ``approve_output`` /
+         ``correct_worker`` based on the revealed quality.
+      3. If a checked output's revealed quality is below ``correct_threshold``
+         we ``correct_worker`` once before approving on the next pass.
+
+    This produces a clearly multi-agent execution trace where multiple workers
+    are simultaneously ``is_active=True`` with different output buffers.
+    """
+
+    # Action ids — keep in sync with ManagerWorkerEnv.ACTION_NAMES
+    ASSIGN = 0
+    CHECK = 1
+    CORRECT = 2
+    APPROVE = 5
+
+    def __init__(self, correct_threshold: float = 0.5, max_corrections_per_worker: int = 1) -> None:
+        self.correct_threshold = correct_threshold
+        self.max_corrections_per_worker = max_corrections_per_worker
+        self._corrections: Dict[int, int] = {}
+
+    def reset(self) -> None:
+        self._corrections = {}
+
+    @staticmethod
+    def _unpack_obs(obs: Union[ManagerWorkerObservation, Dict[str, Any]]):
+        """Return (worker_rows, n_workers_real, subtask_status, real_subtask_count)."""
+        # Default to "size of subtask_status" / 4 worker rows when the new fields
+        # aren't surfaced (older obs payloads, or hand-built observations).
+
+        def _coerce_norm(raw) -> float:
+            try:
+                return float(raw[0])
+            except (TypeError, IndexError):
+                return float(raw)
+
+        if isinstance(obs, ManagerWorkerObservation):
+            sub = list(obs.subtask_status)
+            n_sub_real = (
+                max(1, int(round(float(obs.num_subtasks) * len(sub))))
+                if obs.num_subtasks
+                else len(sub)
+            )
+            rows = obs.worker_states
+            n_w_real = (
+                max(1, int(round(float(obs.num_workers) * len(rows))))
+                if getattr(obs, "num_workers", 0)
+                else len(rows)
+            )
+            return rows, n_w_real, sub, n_sub_real
+
+        sub = list(obs["subtask_status"])
+        if "num_subtasks" in obs:
+            norm = _coerce_norm(obs["num_subtasks"])
+            n_sub_real = max(1, int(round(norm * len(sub)))) if norm > 0 else len(sub)
+        else:
+            n_sub_real = len(sub)
+        rows = obs["worker_states"]
+        if "num_workers" in obs:
+            norm = _coerce_norm(obs["num_workers"])
+            n_w_real = max(1, int(round(norm * len(rows)))) if norm > 0 else len(rows)
+        else:
+            n_w_real = len(rows)
+        return rows, n_w_real, sub, n_sub_real
+
+    def predict(
+        self,
+        obs: Union[ManagerWorkerObservation, Dict[str, Any]],
+        deterministic: bool = True,
+    ) -> ManagerAction:
+        worker_rows, n_workers, subtask_status, n_real = self._unpack_obs(obs)
+        # Only consider the real workers / subtasks; the rest is padding.
+        real_status = subtask_status[:n_real]
+        real_rows = worker_rows[:n_workers]
+
+        # Worker_state row layout from _generate_observation:
+        #   [is_active, progress, hallucination_risk_score, output_quality_if_checked, tokens_consumed_ratio]
+        idle_workers = [i for i, row in enumerate(real_rows) if float(row[0]) < 0.5]
+        active_workers = [i for i, row in enumerate(real_rows) if float(row[0]) >= 0.5]
+
+        # subtask_status tells us what is *complete*; we approximate "in flight"
+        # as the number of currently active workers, so we only assign more if
+        # there are subtasks nobody has picked up yet (otherwise we'd burn
+        # tokens on no-op assigns once every subtask has an owner).
+        incomplete = sum(1 for s in real_status if int(s) == 0)
+        not_yet_started = max(0, incomplete - len(active_workers))
+
+        # Phase 1: fan out — assign a subtask to an idle worker, but only while
+        # there is work that nobody has started yet.
+        if idle_workers and not_yet_started > 0:
+            return ManagerAction(action_id=self.ASSIGN)
+
+        # Phase 2: look at the first active worker and decide check / correct / approve.
+        for wid in active_workers:
+            row = real_rows[wid]
+            checked_quality = float(row[3])
+            # If we've never seen this worker's quality, check it first.
+            if checked_quality <= 0.0:
+                return ManagerAction(action_id=self.CHECK, target_worker_id=wid)
+            # Quality revealed and bad — try a correction (bounded).
+            if (
+                checked_quality < self.correct_threshold
+                and self._corrections.get(wid, 0) < self.max_corrections_per_worker
+            ):
+                self._corrections[wid] = self._corrections.get(wid, 0) + 1
+                return ManagerAction(action_id=self.CORRECT, target_worker_id=wid)
+            # Otherwise approve and free the worker.
+            return ManagerAction(action_id=self.APPROVE, target_worker_id=wid)
+
+        # No idle workers, no active workers, no unassigned subtasks → done. Approve as a no-op-ish.
+        return ManagerAction(action_id=self.APPROVE)
+
+
 class PPOManagerAgent:
     """
     Loads a PPO checkpoint produced by ``training/train_manager.py`` and emits
@@ -90,15 +210,24 @@ class PPOManagerAgent:
         return ManagerAction(action_id=int(action))
 
 
-def load_manager_agent(model_path: Optional[str] = None) -> "HeuristicManagerAgent | PPOManagerAgent":
-    """Convenience constructor — loads PPO if a path is given, else heuristic."""
+def load_manager_agent(
+    model_path: Optional[str] = None,
+    parallel: bool = False,
+) -> "HeuristicManagerAgent | ParallelManagerAgent | PPOManagerAgent":
+    """Convenience constructor.
+
+    Priority: ``model_path`` > ``parallel`` > heuristic.
+    """
     if model_path:
         return PPOManagerAgent(model_path)
+    if parallel:
+        return ParallelManagerAgent()
     return HeuristicManagerAgent()
 
 
 __all__ = [
     "HeuristicManagerAgent",
+    "ParallelManagerAgent",
     "PPOManagerAgent",
     "load_manager_agent",
 ]
