@@ -1,0 +1,7 @@
+.env
+.env.example
+__pycache__/
+*.pyc
+models/
+sig.txt
+manager-worker-env/manager_worker_env.egg-info/
