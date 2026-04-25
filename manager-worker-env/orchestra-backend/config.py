@@ -12,11 +12,12 @@ class Settings(BaseSettings):
     # Server
     APP_NAME: str = "OrchestraAI Backend"
     APP_VERSION: str = "1.0.0"
+    # Vercel: set DEBUG=false in Environment Variables
     DEBUG: bool = True
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
     
-    # CORS
+    # CORS — optional extra origins via Vercel: CORS_EXTRA_ORIGINS as JSON, e.g. ["https://myapp.vercel.app"]
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://localhost:5173",
@@ -24,12 +25,13 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
     ]
+    CORS_EXTRA_ORIGINS: List[str] = []
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: List[str] = ["*"]
     CORS_ALLOW_HEADERS: List[str] = ["*"]
     
-    # MongoDB
-    MONGODB_URL: Optional[str] = "mongodb+srv://yt:Zt2Gp6HjOCpzHux5@complete-backend.uffvz17.mongodb.net/openenv-project"
+    # MongoDB (set MONGODB_URL in Vercel / .env — no default in production)
+    MONGODB_URL: Optional[str] = None
     MONGODB_DB_NAME: str = "openenv-project"
     
     # Environment

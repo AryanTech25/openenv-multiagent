@@ -84,15 +84,33 @@ class LlamaWorker:
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Load model
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
+        # Load model (try flash attention on CUDA; fall back to "eager" if flash-attn is missing)
+        attn = "eager"
+        if self.config.use_flash_attention and self.device == "cuda":
+            attn = "flash_attention_2"
+        load_kw = dict(
             quantization_config=quantization_config,
             device_map="auto" if self.device == "cuda" else None,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
             trust_remote_code=True,
-            attn_implementation="flash_attention_2" if self.config.use_flash_attention else "eager",
+            attn_implementation=attn,
         )
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name, **load_kw
+            )
+        except Exception as e:  # noqa: BLE001 — broad so missing flash deps still work
+            if attn == "flash_attention_2":
+                logger.warning(
+                    "Flash attention 2 unavailable (%s); loading with eager attention.",
+                    e,
+                )
+                load_kw["attn_implementation"] = "eager"
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.config.model_name, **load_kw
+                )
+            else:
+                raise
         
         if self.device == "cpu":
             self.model = self.model.to(self.device)
