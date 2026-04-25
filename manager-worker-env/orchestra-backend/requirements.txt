@@ -1,0 +1,15 @@
+# FastAPI API + ASGI
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# MongoDB (AsyncIOMotorClient, databases)
+motor>=3.0.0
+pymongo>=4.0.0
+
+# Config + models
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# Used by services/metrics_service.py
+numpy>=1.18.0
