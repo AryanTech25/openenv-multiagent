@@ -1,0 +1,77 @@
+Metadata-Version: 2.4
+Name: manager-worker-env
+Version: 0.1.0
+Summary: AI Manager + Worker Multi-Agent Reinforcement Learning Environment
+Author-email: Your Name <your.email@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/yourusername/openenv-multiagent
+Project-URL: Documentation, https://github.com/yourusername/openenv-multiagent/blob/main/README.md
+Project-URL: Repository, https://github.com/yourusername/openenv-multiagent.git
+Project-URL: Bug Tracker, https://github.com/yourusername/openenv-multiagent/issues
+Keywords: reinforcement-learning,multi-agent,manager-worker,openenv,ppo,stable-baselines3
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: 3.14
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: openenv-core>=0.2.3
+Requires-Dist: gymnasium>=0.29.1
+Requires-Dist: stable-baselines3>=2.0.0
+Requires-Dist: torch>=2.3.0
+Requires-Dist: numpy>=1.18.0
+Requires-Dist: pandas>=1.0.0
+Requires-Dist: matplotlib>=3.0.0
+Requires-Dist: wandb>=0.12.0
+Requires-Dist: tensorboard>=2.0.0
+Requires-Dist: fastapi>=0.104.0
+Requires-Dist: uvicorn>=0.24.0
+Requires-Dist: websockets>=15.0.1
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: requests>=2.25.0
+Requires-Dist: huggingface-hub>=0.20.0
+Requires-Dist: python-dotenv>=1.1.0
+Requires-Dist: transformers>=4.36.0
+Requires-Dist: accelerate>=0.24.0
+Requires-Dist: bitsandbytes>=0.41.0
+Requires-Dist: peft>=0.7.0
+Requires-Dist: datasets>=2.14.0
+Requires-Dist: trl>=0.7.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: flake8>=6.0.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+Requires-Dist: isort>=5.12.0; extra == "dev"
+Requires-Dist: pre-commit>=3.0.0; extra == "dev"
+Provides-Extra: docs
+Requires-Dist: sphinx>=5.0.0; extra == "docs"
+Requires-Dist: sphinx-rtd-theme>=1.0.0; extra == "docs"
+Requires-Dist: sphinx-autodoc-typehints>=1.20.0; extra == "docs"
+Provides-Extra: training
+Requires-Dist: tensorboard>=2.0.0; extra == "training"
+Requires-Dist: wandb>=0.12.0; extra == "training"
+Requires-Dist: huggingface-hub>=0.20.0; extra == "training"
+Provides-Extra: backend
+Requires-Dist: fastapi>=0.104.0; extra == "backend"
+Requires-Dist: uvicorn>=0.24.0; extra == "backend"
+Requires-Dist: websockets>=15.0.1; extra == "backend"
+Requires-Dist: motor>=3.0.0; extra == "backend"
+Requires-Dist: pymongo>=4.0.0; extra == "backend"
+Provides-Extra: llm
+Requires-Dist: transformers>=4.36.0; extra == "llm"
+Requires-Dist: accelerate>=0.24.0; extra == "llm"
+Requires-Dist: bitsandbytes>=0.41.0; extra == "llm"
+Requires-Dist: peft>=0.7.0; extra == "llm"
+Requires-Dist: datasets>=2.14.0; extra == "llm"
+Requires-Dist: trl>=0.7.0; extra == "llm"
+Provides-Extra: all
+Requires-Dist: manager-worker-env[backend,dev,docs,llm,training]; extra == "all"

@@ -1,9 +1,9 @@
 """
-Worker Pool Manager for managing multiple Llama workers.
+Worker Pool Manager for managing multiple Hugging Face workers.
 """
 
 from typing import List, Dict, Any, Optional
-from agents.llm_worker import LlamaWorker, LlamaWorkerConfig
+from agents.llm_worker import HFWorker, HFWorkerConfig
 import logging
 import random
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class WorkerPool:
     """
-    Manages a pool of Llama worker agents.
+    Manages a pool of Hugging Face worker agents.
     
     Handles:
     - Worker initialization
@@ -24,35 +24,43 @@ class WorkerPool:
     def __init__(
         self,
         num_workers: int = 4,
-        config: Optional[LlamaWorkerConfig] = None,
+        config: Optional[HFWorkerConfig] = None,
     ):
         """
         Initialize worker pool.
         
         Args:
             num_workers: Number of workers in the pool
-            config: LlamaWorkerConfig for all workers
+            config: HFWorkerConfig for all workers
         """
         self.num_workers = num_workers
-        self.config = config or LlamaWorkerConfig()
-        self.workers: List[LlamaWorker] = []
+        self.config = config or HFWorkerConfig()
+        self.workers: List[HFWorker] = []
         self.worker_states: Dict[int, Dict[str, Any]] = {}
         
         self._initialize_workers()
     
     def _initialize_workers(self) -> None:
         """Initialize all workers with random skill levels."""
-        logger.info(f"Initializing {self.num_workers} Llama workers...")
+        logger.info(f"Initializing {self.num_workers} {self.config.model_id} workers ({self.config.worker_type} mode)...")
         
         for worker_id in range(self.num_workers):
             # Random skill level between 0.3 and 1.0
             skill_level = random.uniform(0.3, 1.0)
             
-            worker = LlamaWorker(
-                worker_id=worker_id,
-                skill_level=skill_level,
-                config=self.config,
-            )
+            if self.config.worker_type == "api":
+                from agents.llm_worker import HFAPIWorker
+                worker = HFAPIWorker(
+                    worker_id=worker_id,
+                    skill_level=skill_level,
+                    config=self.config,
+                )
+            else:
+                worker = HFWorker(
+                    worker_id=worker_id,
+                    skill_level=skill_level,
+                    config=self.config,
+                )
             
             self.workers.append(worker)
             self.worker_states[worker_id] = {

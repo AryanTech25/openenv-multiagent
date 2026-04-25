@@ -116,12 +116,12 @@ run-training = "training.run_training:main"
 server = "orchestra_backend.main:main"
 
 [tool.setuptools]
-packages = ["env", "training", "orchestra_backend"]
+packages = ["env", "training", "orchestra-backend"]
 
 [tool.setuptools.package-data]
 env = ["*.py"]
 training = ["*.py"]
-orchestra_backend = ["*.py"]
+orchestra-backend = ["*.py"]
 
 [tool.black]
 line-length = 100
@@ -146,7 +146,7 @@ extend-exclude = '''
 profile = "black"
 line_length = 100
 skip_gitignore = true
-known_first_party = ["env", "training", "orchestra_backend"]
+known_first_party = ["env", "training", "orchestra-backend"]
 
 [tool.mypy]
 python_version = "3.9"
@@ -192,7 +192,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["env", "training", "orchestra_backend"]
+source = ["env", "training", "orchestra-backend"]
 omit = [
     "*/tests/*",
     "*/test_*.py",

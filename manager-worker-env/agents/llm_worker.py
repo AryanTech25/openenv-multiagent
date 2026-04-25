@@ -1,43 +1,52 @@
 """
-LLM-based Worker Agent using Llama 2 7B from HuggingFace.
+Generic Hugging Face Worker Agent for multi-agent coordination.
 """
 
 import torch
 from typing import Optional, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from huggingface_hub import InferenceClient
 import logging
 import random
 
 logger = logging.getLogger(__name__)
 
 
-class LlamaWorkerConfig:
-    """Configuration for Llama 2 Worker."""
+class HFWorkerConfig:
+    """Configuration for Hugging Face Worker."""
     
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-2-7b-hf",
+        model_id: str = "meta-llama/Llama-2-7b-hf",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_8bit: bool = True,
         use_flash_attention: bool = True,
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        hf_token: Optional[str] = None,
+        worker_type: str = "local", # "local" or "api"
     ):
-        self.model_name = model_name
+        self.model_id = model_id
         self.device = device
         self.use_8bit = use_8bit
         self.use_flash_attention = use_flash_attention
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
+        self.hf_token = hf_token
+        self.worker_type = worker_type
 
 
-class LlamaWorker:
+# For backward compatibility
+LlamaWorkerConfig = HFWorkerConfig
+
+
+class HFWorker:
     """
-    Worker Agent powered by Llama 2 7B.
+    Worker Agent powered by any Hugging Face Causal LM.
     
-    This worker generates task outputs using the Llama 2 model.
+    This worker generates task outputs using a model from the Hugging Face Hub.
     Failure modes are injected post-generation based on skill level.
     """
     
@@ -45,19 +54,19 @@ class LlamaWorker:
         self,
         worker_id: int,
         skill_level: float,
-        config: Optional[LlamaWorkerConfig] = None,
+        config: Optional[HFWorkerConfig] = None,
     ):
         """
-        Initialize Llama Worker.
+        Initialize HF Worker.
         
         Args:
             worker_id: Unique worker identifier
             skill_level: Worker competence (0.0-1.0)
-            config: LlamaWorkerConfig instance
+            config: HFWorkerConfig instance
         """
         self.worker_id = worker_id
         self.skill_level = skill_level
-        self.config = config or LlamaWorkerConfig()
+        self.config = config or HFWorkerConfig()
         
         self.model = None
         self.tokenizer = None
@@ -66,8 +75,8 @@ class LlamaWorker:
         self._load_model()
     
     def _load_model(self) -> None:
-        """Load Llama 2 model and tokenizer from HuggingFace."""
-        logger.info(f"Loading {self.config.model_name} on {self.device}...")
+        """Load model and tokenizer from Hugging Face."""
+        logger.info(f"Loading {self.config.model_id} on {self.device}...")
         
         # Configure 8-bit quantization if enabled
         quantization_config = None
@@ -79,27 +88,32 @@ class LlamaWorker:
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.model_name,
+            self.config.model_id,
+            token=self.config.hf_token,
             trust_remote_code=True,
         )
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load model (try flash attention on CUDA; fall back to "eager" if flash-attn is missing)
         attn = "eager"
         if self.config.use_flash_attention and self.device == "cuda":
             attn = "flash_attention_2"
+            
         load_kw = dict(
             quantization_config=quantization_config,
             device_map="auto" if self.device == "cuda" else None,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
             trust_remote_code=True,
             attn_implementation=attn,
+            token=self.config.hf_token,
         )
+        
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model_name, **load_kw
+                self.config.model_id, **load_kw
             )
-        except Exception as e:  # noqa: BLE001 — broad so missing flash deps still work
+        except Exception as e:
             if attn == "flash_attention_2":
                 logger.warning(
                     "Flash attention 2 unavailable (%s); loading with eager attention.",
@@ -107,7 +121,7 @@ class LlamaWorker:
                 )
                 load_kw["attn_implementation"] = "eager"
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    self.config.model_name, **load_kw
+                    self.config.model_id, **load_kw
                 )
             else:
                 raise
@@ -116,7 +130,7 @@ class LlamaWorker:
             self.model = self.model.to(self.device)
         
         self.model.eval()
-        logger.info(f"✓ Model loaded successfully on {self.device}")
+        logger.info(f"✓ Model {self.config.model_id} loaded successfully on {self.device}")
     
     def work_on_task(self, subtask: Dict[str, Any]) -> str:
         """
@@ -139,25 +153,24 @@ class LlamaWorker:
         
         return output
     
-    def _build_prompt(self, subtask: Dict[str, Any]) -> str:
-        """Build prompt for the subtask."""
-        description = subtask.get("description", "")
-        context = subtask.get("context", "")
+    def _build_prompt(self, task_description: str, context: Optional[str] = None) -> str:
+        """
+        Build a high-quality instruction prompt.
+        """
+        skill_description = (
+            "expert-level, professional, and accurate" if self.skill_level > 0.8 else
+            "reliable and competent" if self.skill_level > 0.5 else
+            "basic and preliminary"
+        )
         
-        prompt = f"""You are a worker with skill level {self.skill_level:.1f}/1.0.
-
-Task: {description}
-
-Context: {context}
-
-Generate a complete and accurate output for this task. Your skill level affects quality:
-- 0.9-1.0: Excellent, complete, well-structured work
-- 0.6-0.8: Good work with minor issues
-- 0.3-0.5: Partial work with some errors
-- 0.0-0.3: Poor work with many errors
-
-Output:"""
+        prompt = f"### System: You are an AI worker agent with {skill_description} proficiency.\n"
+        prompt += f"### Instruction: Please complete the following task to the best of your ability.\n\n"
+        prompt += f"TASK:\n{task_description}\n\n"
         
+        if context:
+            prompt += f"CONTEXT & CONSTRAINTS:\n{context}\n\n"
+            
+        prompt += "### Output:\n"
         return prompt
     
     def _generate_output(self, prompt: str) -> str:
@@ -188,12 +201,6 @@ Output:"""
     def _inject_failures(self, output: str, subtask: Dict[str, Any]) -> str:
         """
         Inject realistic failures based on skill level.
-        
-        Failure modes:
-        - Hallucination: Output looks good but has subtle errors
-        - Off-task: Output is unrelated to the task
-        - Incomplete: Output is partial
-        - Stuck: Worker loops (handled at environment level)
         """
         # Probability of failure increases as skill decreases
         failure_probability = (1 - self.skill_level) * 0.7
@@ -213,28 +220,19 @@ Output:"""
             return self._inject_incomplete(output)
     
     def _inject_hallucination(self, output: str) -> str:
-        """
-        Inject hallucination: output looks good but has subtle errors.
-        
-        Examples:
-        - Missing closing tags in HTML
-        - Incorrect variable names in code
-        - Inconsistent formatting
-        """
+        """Inject hallucination: output looks good but has subtle errors."""
         hallucinations = [
-            lambda x: x + "\n<!-- TODO: Fix styling -->",  # Incomplete comment
-            lambda x: x.replace("function", "func"),  # Wrong syntax
-            lambda x: x[:len(x)//2] + "\n[... rest of output ...]",  # Truncated
-            lambda x: x + "\n\nNote: This might need review",  # Uncertain
+            lambda x: x + "\n<!-- TODO: Fix styling -->",
+            lambda x: x.replace("function", "func"),
+            lambda x: x[:len(x)//2] + "\n[... rest of output ...]",
+            lambda x: x + "\n\nNote: This might need review",
         ]
         
         corrupted = random.choice(hallucinations)(output)
         return corrupted
     
     def _inject_off_task(self, output: str) -> str:
-        """
-        Inject off-task: output is unrelated to the task.
-        """
+        """Inject off-task: output is unrelated to the task."""
         off_task_outputs = [
             "I'm not sure how to approach this task. Let me think about something else.",
             "This reminds me of a different problem I solved before...",
@@ -245,10 +243,7 @@ Output:"""
         return random.choice(off_task_outputs)
     
     def _inject_incomplete(self, output: str) -> str:
-        """
-        Inject incomplete: output is partial.
-        """
-        # Truncate output to 30-70% of original length
+        """Inject incomplete: output is partial."""
         truncation_ratio = random.uniform(0.3, 0.7)
         truncated_length = int(len(output) * truncation_ratio)
         return output[:truncated_length] + "\n[Output incomplete - worker ran out of time]"
@@ -259,5 +254,69 @@ Output:"""
             del self.model
         if self.tokenizer is not None:
             del self.tokenizer
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         logger.info(f"✓ Worker {self.worker_id} cleaned up")
+
+
+class HFAPIWorker(HFWorker):
+    """
+    Worker Agent that uses the Hugging Face Inference API.
+    Zero local memory footprint.
+    """
+    
+    def __init__(
+        self,
+        worker_id: int,
+        skill_level: float,
+        config: Optional[HFWorkerConfig] = None,
+    ):
+        self.worker_id = worker_id
+        self.skill_level = skill_level
+        self.config = config or HFWorkerConfig()
+        self.client = InferenceClient(token=self.config.hf_token)
+        logger.info(f"✓ API Worker {self.worker_id} initialized (Model: {self.config.model_id})")
+
+    def _load_model(self) -> None:
+        """No local loading needed for API worker."""
+        pass
+
+    def _generate_output(self, prompt: str) -> str:
+        """Generate output via HF Inference API with Chat fallback."""
+        try:
+            # Try standard text generation first
+            response = self.client.text_generation(
+                prompt,
+                model=self.config.model_id,
+                max_new_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
+                do_sample=True,
+            )
+            return response.strip()
+        except Exception as e:
+            # If text-generation isn't supported, try conversational (Chat) API
+            if "conversational" in str(e).lower() or "chat" in str(e).lower():
+                try:
+                    chat_response = self.client.chat_completion(
+                        messages=[{"role": "user", "content": prompt}],
+                        model=self.config.model_id,
+                        max_tokens=self.config.max_tokens,
+                        temperature=self.config.temperature,
+                        top_p=self.config.top_p,
+                    )
+                    return chat_response.choices[0].message.content.strip()
+                except Exception as chat_e:
+                    logger.error(f"Chat API Error for worker {self.worker_id}: {chat_e}")
+                    return f"[Error: Chat API failed - {chat_e}]"
+            
+            logger.error(f"API Error for worker {self.worker_id}: {e}")
+            return f"[Error: API failed - {e}]"
+
+    def cleanup(self) -> None:
+        """No local resources to clean up."""
+        logger.info(f"✓ API Worker {self.worker_id} cleaned up")
+
+
+# For backward compatibility
+LlamaWorker = HFWorker
