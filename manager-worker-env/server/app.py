@@ -254,12 +254,10 @@ async def list_episodes(
 ):
     """List all episodes."""
     try:
-        episodes = await manager.list_episodes(skip=skip, limit=limit)
+        result = await manager.list_episodes()
         return EpisodeListResponse(
-            episodes=episodes,
-            total=len(episodes),
-            skip=skip,
-            limit=limit,
+            episodes=result.get('episodes', []),
+            total_count=result.get('total_count', 0),
             timestamp=datetime.utcnow(),
         )
     except Exception as e:

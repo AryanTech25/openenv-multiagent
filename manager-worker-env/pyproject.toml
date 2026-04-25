@@ -98,16 +98,15 @@ Repository = "https://github.com/yourusername/openenv-multiagent.git"
 manager-worker-env = "manager_worker_env.cli:main"
 train-manager = "training.train_manager:main"
 run-training = "training.run_training:main"
-server = "server.app:main"
+server = "orchestra_backend.main:main"
 
 [tool.setuptools]
-packages = ["env", "training", "BE", "server"]
+packages = ["env", "training", "orchestra_backend"]
 
 [tool.setuptools.package-data]
 env = ["*.py"]
 training = ["*.py"]
-BE = ["*.py"]
-server = ["*.py"]
+orchestra_backend = ["*.py"]
 
 [tool.black]
 line-length = 100
@@ -132,7 +131,7 @@ extend-exclude = '''
 profile = "black"
 line_length = 100
 skip_gitignore = true
-known_first_party = ["env", "training", "BE"]
+known_first_party = ["env", "training", "orchestra_backend"]
 
 [tool.mypy]
 python_version = "3.9"
@@ -170,7 +169,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
-addopts = "-v --cov=env --cov=training --cov=BE --cov-report=html --cov-report=term-missing"
+addopts = "-v --cov=env --cov=training --cov=orchestra_backend --cov-report=html --cov-report=term-missing"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
@@ -178,7 +177,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["env", "training", "BE"]
+source = ["env", "training", "orchestra_backend"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
