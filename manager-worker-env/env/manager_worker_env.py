@@ -8,15 +8,22 @@ Manager to learn detection and correction strategies under a limited token budge
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple, TYPE_CHECKING
+import logging
+
 import numpy as np
 from pydantic import BaseModel, Field
 
 from openenv.core import Environment, State, Observation, Action
 
 from env.task_library import TaskLibrary, Task, Subtask
-from env.hallucination_engine import HallucinationEngine
+from env.hallucination_engine import HallucinationEngine, WorkerOutput
 from env.reward_calculator import RewardCalculator
+
+if TYPE_CHECKING:
+    from agents.worker_pool import WorkerPool
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -30,13 +37,17 @@ class WorkerStateModel(BaseModel):
     is_active: bool = False
     current_subtask_id: Optional[int] = None
     progress: float = 0.0  # 0.0 to 1.0
-    hallucination_risk_score: float = 0.0  # 0.0 to 1.0
-    output_quality_if_checked: float = 0.0  # 0.0 to 1.0
+    hallucination_risk_score: float = 0.0  # 0.0 to 1.0 (surface plausibility — what the manager sees pre-check)
+    output_quality_if_checked: float = 0.0  # 0.0 to 1.0 (revealed only after a check action)
     tokens_consumed: int = 0
     failure_mode: Optional[str] = None  # 'hallucination', 'off_task', 'incomplete', 'stuck', None
     output_buffer: str = ""
     patience_counter: int = 0  # For detecting stuck loops
     skill_level: float = 0.5  # 0.3 to 1.0
+    # Internal ground truth (not directly exposed in observation):
+    actual_quality: float = 0.0
+    is_checked: bool = False
+    has_output: bool = False
 
 
 class ManagerWorkerObservation(Observation):
@@ -111,7 +122,11 @@ class ManagerWorkerEnv(Environment):
         6: 20,   # request_clarification
     }
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        worker_pool: Optional["WorkerPool"] = None,
+    ):
         """
         Initialize environment with configuration.
         
@@ -122,6 +137,12 @@ class ManagerWorkerEnv(Environment):
                 - token_budget: int (default 1000, range 500-5000)
                 - task_difficulty: int (default 3, range 1-5)
                 - failure_injection_rate: float (default 0.6, range 0.0-1.0)
+            worker_pool: Optional WorkerPool of real LLM workers. When provided,
+                workers actually generate text via Hugging Face models on
+                ``assign_subtask`` and ``correct_worker`` actions; quality and
+                failure type are still scored by ``HallucinationEngine`` for the
+                Manager's reward signal. When ``None`` the env runs in
+                simulator-only mode (suitable for fast PPO training).
         """
         super().__init__()
         
@@ -144,7 +165,23 @@ class ManagerWorkerEnv(Environment):
         self.task_library = TaskLibrary()
         self.hallucination_engine = HallucinationEngine()
         self.reward_calculator = RewardCalculator()
-        
+
+        # Optional real LLM worker pool. If supplied, the env will actually
+        # invoke the LLMs when assigning subtasks. Quality scoring still goes
+        # through the hallucination engine so reward signal stays consistent.
+        self.worker_pool = worker_pool
+        if self.worker_pool is not None and len(self.worker_pool.workers) < self.max_workers:
+            logger.warning(
+                "WorkerPool has %d workers but env max_workers=%d; clamping max_workers to pool size.",
+                len(self.worker_pool.workers),
+                self.max_workers,
+            )
+            self.max_workers = len(self.worker_pool.workers)
+
+        # The current task's Subtask objects (kept on the env, not in the
+        # serialisable Pydantic state, so we can use them at action time).
+        self._current_subtasks: List[Subtask] = []
+
         # Initialize state
         self._state = ManagerWorkerState(
             max_workers=self.max_workers,
@@ -173,6 +210,7 @@ class ManagerWorkerEnv(Environment):
         """
         # Select random task from task library
         task = self.task_library.sample_task(difficulty=self.task_difficulty)
+        self._current_subtasks = list(task.subtasks)
         self.state.task = {
             'task_id': task.task_id,
             'task_type': task.task_type,
@@ -182,10 +220,16 @@ class ManagerWorkerEnv(Environment):
             'num_subtasks': len(task.subtasks),
         }
         
-        # Initialize workers with random skill levels
+        # Initialize workers. When a real WorkerPool is attached we mirror its
+        # skill levels (and reset its per-worker bookkeeping) so manager
+        # observations stay in sync with the LLMs that will actually run.
         self.state.workers = []
         for i in range(self.max_workers):
-            skill_level = np.random.uniform(0.3, 1.0)
+            if self.worker_pool is not None and i < len(self.worker_pool.workers):
+                skill_level = float(self.worker_pool.workers[i].skill_level)
+                self.worker_pool.reset_worker(i)
+            else:
+                skill_level = float(np.random.uniform(0.3, 1.0))
             worker = WorkerStateModel(
                 worker_id=i,
                 is_active=False,
@@ -344,8 +388,70 @@ class ManagerWorkerEnv(Environment):
         elif action == 6:  # request_clarification
             self._action_request_clarification()
     
+    # ------------------------------------------------------------------
+    # Worker execution helpers
+    # ------------------------------------------------------------------
+
+    def _get_subtask(self, subtask_id: int) -> Subtask:
+        """Return the live Subtask object for a given index, or a synthetic one."""
+        if 0 <= subtask_id < len(self._current_subtasks):
+            return self._current_subtasks[subtask_id]
+        # Fallback: synthesise a placeholder so the env never crashes if the
+        # task library was bypassed.
+        return Subtask(
+            subtask_id=subtask_id,
+            description=f"Subtask {subtask_id}",
+            expected_output_format="text",
+            quality_threshold=0.7,
+        )
+
+    def _run_worker(self, worker: WorkerStateModel, subtask: Subtask, skill_boost: float = 0.0) -> None:
+        """
+        Have a worker actually produce output for ``subtask``.
+
+        The HallucinationEngine determines ground-truth quality and failure
+        type. If a real WorkerPool is attached the LLM also generates the
+        textual content; otherwise we keep the engine's stub content. Either
+        way, the manager only learns the truth by spending tokens on a check.
+        """
+        effective_skill = float(np.clip(worker.skill_level + skill_boost, 0.0, 1.0))
+        output: WorkerOutput = self.hallucination_engine.generate_output(
+            subtask_description=subtask.description,
+            worker_skill=effective_skill,
+            task_difficulty=self.task_difficulty,
+            failure_injection_rate=self.failure_injection_rate,
+        )
+
+        content = output.content
+        if self.worker_pool is not None and worker.worker_id < len(self.worker_pool.workers):
+            try:
+                llm_text = self.worker_pool.assign_task(
+                    worker.worker_id,
+                    {
+                        "description": subtask.description,
+                        "context": subtask.expected_output_format,
+                    },
+                )
+                if llm_text:
+                    content = llm_text
+            except Exception as exc:  # noqa: BLE001 — we want the env to keep running
+                logger.warning("WorkerPool LLM call failed for worker %d: %s", worker.worker_id, exc)
+
+        worker.output_buffer = content
+        worker.actual_quality = float(output.actual_quality)
+        worker.hallucination_risk_score = float(output.surface_plausibility)
+        worker.failure_mode = output.failure_type
+        worker.progress = 1.0
+        worker.is_checked = False
+        worker.has_output = True
+        worker.output_quality_if_checked = 0.0  # hidden until manager checks
+
+    # ------------------------------------------------------------------
+    # Manager actions
+    # ------------------------------------------------------------------
+
     def _action_assign_subtask(self) -> None:
-        """Assign next unassigned subtask to an idle worker."""
+        """Assign next unassigned subtask to an idle worker and run them on it."""
         for i, assigned in enumerate(self.state.subtask_assignments):
             if assigned is None and not self.state.subtask_status[i]:
                 for worker in self.state.workers:
@@ -355,70 +461,119 @@ class ManagerWorkerEnv(Environment):
                         worker.progress = 0.0
                         worker.output_buffer = ""
                         worker.patience_counter = 0
+                        worker.is_checked = False
+                        worker.has_output = False
+                        worker.failure_mode = None
+                        worker.output_quality_if_checked = 0.0
                         self.state.subtask_assignments[i] = worker.worker_id
+                        self._run_worker(worker, self._get_subtask(i))
                         break
                 break
-    
+
     def _action_check_worker_output(self) -> None:
-        """Check active worker's output quality."""
+        """Reveal the active worker's true output quality and update detection counters."""
         for worker in self.state.workers:
-            if worker.is_active and worker.current_subtask_id is not None:
-                worker.output_quality_if_checked = np.random.uniform(0.0, 1.0)
+            if worker.is_active and worker.current_subtask_id is not None and worker.has_output:
+                if not worker.is_checked:
+                    if worker.failure_mode == 'hallucination':
+                        # Catching a high-plausibility-but-wrong output is the
+                        # behaviour the reward most strongly incentivises.
+                        self.state.hallucinations_detected += 1
+                    total_attempts = (
+                        self.state.hallucinations_detected
+                        + self.state.hallucinations_approved
+                    )
+                    if total_attempts > 0:
+                        self.state.hallucination_catch_rate = (
+                            self.state.hallucinations_detected / total_attempts
+                        )
+                worker.is_checked = True
+                worker.output_quality_if_checked = worker.actual_quality
                 break
-    
+
     def _action_correct_worker(self) -> None:
-        """Send corrective instructions to a worker."""
+        """Send corrective instructions to a worker and have them retry."""
         for worker in self.state.workers:
-            if worker.is_active and worker.current_subtask_id is not None:
-                improvement = np.random.uniform(0.2, 0.5)
-                worker.output_quality_if_checked = min(1.0, worker.output_quality_if_checked + improvement)
+            if worker.is_active and worker.current_subtask_id is not None and worker.has_output:
+                if worker.failure_mode is None:
+                    # Correcting a clean worker is wasted budget — count it as a false positive.
+                    self.state.false_positives += 1
+                subtask = self._get_subtask(worker.current_subtask_id)
+                # A correction nudges effective skill upward for this retry only.
+                self._run_worker(worker, subtask, skill_boost=0.2)
                 break
-    
+
     def _action_reassign_task(self) -> None:
-        """Reassign current subtask to different worker."""
+        """Move the current subtask to a different idle worker, who runs it fresh."""
         for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
+                if worker.failure_mode is None and worker.has_output:
+                    self.state.false_positives += 1
                 subtask_id = worker.current_subtask_id
                 worker.is_active = False
                 worker.current_subtask_id = None
                 worker.progress = 0.0
                 worker.output_buffer = ""
+                worker.has_output = False
+                worker.is_checked = False
+                worker.failure_mode = None
                 for other_worker in self.state.workers:
                     if not other_worker.is_active:
                         other_worker.is_active = True
                         other_worker.current_subtask_id = subtask_id
                         other_worker.progress = 0.0
                         other_worker.output_buffer = ""
+                        other_worker.is_checked = False
+                        other_worker.has_output = False
+                        other_worker.failure_mode = None
                         self.state.subtask_assignments[subtask_id] = other_worker.worker_id
+                        self._run_worker(other_worker, self._get_subtask(subtask_id))
                         break
                 break
-    
+
     def _action_fire_and_replace(self) -> None:
-        """Replace a worker with a new one."""
+        """Replace a worker with a new one and re-run the in-flight subtask if any."""
         for i, worker in enumerate(self.state.workers):
             if worker.is_active:
+                if worker.failure_mode is None and worker.has_output:
+                    self.state.false_positives += 1
                 subtask_id = worker.current_subtask_id
-                new_skill = np.random.uniform(0.3, 1.0)
-                self.state.workers[i] = WorkerStateModel(
+                new_skill = float(np.random.uniform(0.3, 1.0))
+                replacement = WorkerStateModel(
                     worker_id=i,
-                    is_active=True if subtask_id is not None else False,
+                    is_active=subtask_id is not None,
                     current_subtask_id=subtask_id,
                     skill_level=new_skill,
                 )
+                self.state.workers[i] = replacement
+                if subtask_id is not None:
+                    self._run_worker(replacement, self._get_subtask(subtask_id))
                 break
-    
+
     def _action_approve_output(self) -> None:
         """Approve active worker's output and mark subtask complete."""
         for worker in self.state.workers:
             if worker.is_active and worker.current_subtask_id is not None:
+                if worker.has_output and not worker.is_checked and worker.failure_mode == 'hallucination':
+                    # Approving a hallucination without checking is the worst-case
+                    # mistake — the reward calculator penalises this heavily.
+                    self.state.hallucinations_approved += 1
+                    total_attempts = (
+                        self.state.hallucinations_detected
+                        + self.state.hallucinations_approved
+                    )
+                    if total_attempts > 0:
+                        self.state.hallucination_catch_rate = (
+                            self.state.hallucinations_detected / total_attempts
+                        )
                 subtask_id = worker.current_subtask_id
                 self.state.subtask_status[subtask_id] = True
                 worker.is_active = False
                 worker.current_subtask_id = None
                 break
-    
+
     def _action_request_clarification(self) -> None:
-        """Request clarification about task structure."""
+        """Request clarification — currently a soft no-op that just spends budget."""
         pass
     
     def _check_termination(self) -> bool:
@@ -439,24 +594,31 @@ class ManagerWorkerEnv(Environment):
         return False
     
     def _compute_final_quality(self) -> float:
-        """Compute final quality score from completed subtasks."""
+        """
+        Compute final quality across completed subtasks.
+
+        Uses the worker's *actual* quality (from the hallucination engine),
+        not ``output_quality_if_checked`` — otherwise approving without
+        checking would always score 0.0 and the manager couldn't learn the
+        approve-vs-check trade-off properly.
+        """
         if not self.state.task or self.state.task['num_subtasks'] == 0:
             return 0.0
-        
+
         total_quality = 0.0
         completed_count = 0
-        
+
         for i, is_complete in enumerate(self.state.subtask_status):
             if is_complete:
                 worker_id = self.state.subtask_assignments[i]
-                if worker_id is not None:
+                if worker_id is not None and worker_id < len(self.state.workers):
                     worker = self.state.workers[worker_id]
-                    total_quality += worker.output_quality_if_checked
+                    total_quality += worker.actual_quality
                     completed_count += 1
-        
+
         if completed_count == 0:
             return 0.0
-        
+
         return total_quality / completed_count
     
     def _generate_observation(self) -> ManagerWorkerObservation:

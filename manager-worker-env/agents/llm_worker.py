@@ -142,15 +142,16 @@ class HFWorker:
         Returns:
             Generated output string
         """
-        # Build prompt
-        prompt = self._build_prompt(subtask)
-        
-        # Generate output
+        if isinstance(subtask, dict):
+            description = subtask.get("description") or subtask.get("task") or str(subtask)
+            context = subtask.get("context")
+        else:
+            description = str(subtask)
+            context = None
+
+        prompt = self._build_prompt(description, context)
         output = self._generate_output(prompt)
-        
-        # Inject failures based on skill level
         output = self._inject_failures(output, subtask)
-        
         return output
     
     def _build_prompt(self, task_description: str, context: Optional[str] = None) -> str:
